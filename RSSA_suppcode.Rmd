@@ -1,0 +1,210 @@
+---
+title: "Bayesian Cluster Analysis"
+author: "Sara Wade"
+date: '2022-08-26'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(mvtnorm) 
+library(msm)
+library(MCMCpack)
+library(mcclust.ext)
+library(HDInterval)
+library(ggplot2)
+library(tidyverse)
+library(gridExtra)
+library(ggforce)
+```
+
+## Introduction
+
+This document provides more details on the experiments in *Wade (2022), "Bayesian Cluster Analysis" JRSS A*. In particular, in different simulated data scenarios, we consider Dirichlet process mixtures models and compare the **marginal posterior on the number of clusters** with different posterior clustering estimates. In the following, we consider three posterior clustering estimates, which can all be obtained by minimizing the posterior expected loss function for a specificied loss function over partitions: 
+
+* **MAP clustering**: obtained under the 0-1 loss function;
+* **VI clustering**: obtained by minimizing the posterior expected VI distance;
+* **Binder clustering**: obtained by minimizing the posterior expected Binder's loss (or equivalently, maximizing the posterior expected Rand Index or Hamming distance)
+
+The three different simulated scenarios considered in this document have been studied from a theoretical perspective in the papers of [Miller and Harrison (2013)](https://proceedings.neurips.cc/paper/2013/file/f7e6c85504ce6e82442c770f7c8606f0-Paper.pdf) and [Rajkowski (2019)](https://projecteuclid.org/journals/bayesian-analysis/volume-14/issue-2/Analysis-of-the-Maximal-a-Posteriori-Partition-in-the-Gaussian/10.1214/18-BA1114.full).
+
+The DP mixture of normals considered in the experiments is defined as
+
+$$ y_i |P \sim \int \text{N}(\cdot \mid \mu, \Sigma) dP(\mu, \Sigma)), \quad P \sim DP(\alpha P_0), $$
+where $y_i \in \mathbb{R}^p$, $\mu \in \mathbb{R}^p$, and $\Sigma$ is $p$ by $p$ diagonal matrix. The base measure $P_0$ of the DP specifies the prior over the atoms, i.e. the unique parameters of the clusters, and we consider the conjugate Normal-Inverse Gamma prior:
+$$ \mu_j \mid \sigma^2_j \sim \text{N}(\mu_{0,j}, \sigma^2_j/c_j), \quad \sigma^2_j \sim \text{IG}(a_j, b_j) \quad \text{  for } j=1,\ldots, p.$$
+We also explore different choices and sensitivity to DP concentration parameter $\alpha$, namely $\alpha = \widehat{k}/\log(n), 0.5, 1, 2$.
+
+In all examples, we repeat the experiment $50$ times and run an MCMC algorithm for $10,000$ iterations after discarding the first $1,000$. In each case, we save the four estimates for the number of clusters: the marginal posterior mode and the number of clusters in the MAP, VI, and Binder clustering estimates. 
+
+## Example 1: Miller and Harrison (2013) - Standard Normal
+
+In this example, data is generated from a standard normal, i.e. only one cluster. [Miller and Harrison (2013)](https://proceedings.neurips.cc/paper/2013/file/f7e6c85504ce6e82442c770f7c8606f0-Paper.pdf) focus on the asymptotic beahvior of the marginal posterior on the number of clusters. In particular, they demonstrate that the posterior on the number of clusters in DP mixtures is inconsistent when true number is finite. In fact, the posterior is demonstrated to be *severely inconsistent*, as the posterior probability that the number of non-empty components equals the truth asymptotically tends to zero. 
+
+```{r e1_dgp,message=FALSE,out.width = "50%",out.height = "50%"}
+# Generate data from a standard normal
+n=200
+p=1
+x=matrix(rnorm(p*n),n,p)
+ggplot() +
+  geom_histogram(aes(x)) + 
+  theme_bw()
+```
+
+The parameters of the Normal-Inverse Gamma base measure are:
+
+```{r bmparams}
+# Set parameter values of base measure
+a_x=matrix((p+2)/2,p,1)
+b_x=matrix(apply(x,2,var)/2*p,p,1)
+mu_0=matrix(0,p,1)
+c_x=rep(0.5,p)
+```
+In particular, `2*a_x=p+2` represents the degrees of freedom in marginal t-prior and is chosen to be the largest integer that gives finite variance, and `b_x` is chosen so that the prior mean of the within cluster variance matches the empirical variance. The factor `c_x` is set to `0.5` to increase the between variance relative to the within variance. 
+
+```{r millerresults,out.width = "125%",out.height = "125%"}
+# Load and plot the results
+load("miller_results.RData")
+alphachoices = as.numeric(unique(miller_results$alpha))
+p1 = ggplot(data = miller_results) +
+  geom_boxplot(aes(x = alpha, y = kmode, fill = n)) +
+  theme_bw() +
+  scale_x_discrete(labels = c("1/log(n)", as.character(round(alphachoices,2))[-1])) +
+  labs(title="Marginal Posterior Mode")
+p2 = ggplot(data = miller_results) +
+  geom_boxplot(aes(x = alpha, y = kMAP, fill = n)) +
+  theme_bw() +
+  scale_x_discrete(labels = c("1/log(n)", as.character(round(alphachoices,2))[-1])) +
+  labs(title="MAP Clustering")
+p3 = ggplot(data = miller_results) +
+  geom_boxplot(aes(x = alpha, y = kVI, fill = n)) +
+  theme_bw() +
+  scale_x_discrete(labels = c("1/log(n)", as.character(round(alphachoices,2))[-1])) +
+  labs(title="VI Clustering")
+p4 = ggplot(data = miller_results) +
+  geom_boxplot(aes(x = alpha, y = kBinder, fill = n)) +
+  theme_bw() +
+  scale_x_discrete(labels = c("1/log(n)", as.character(round(alphachoices,2))[-1])) +
+  labs(title="Binder Clustering")
+grid.arrange(p1, p2, p3, p4, nrow = 2)
+```
+
+The results highlight the quite striking difference in results when comparing the marginal posterior on the clusters against the number of clusters in the MAP, VI, or Binder clustering estimate. The marginal posterior on the number of clusters tends to overestimate the number of clusters and is sensitive to the choice of the concentration parameter $\alpha$, while both the MAP and VI cluster are able to recover the true number of clusters and are robust to the choice of $\alpha$. The Binder clustering instead extremely overestimates the number of clusters and tends to create many small singletons when the allocation is uncertain. 
+
+## Example 2: Rajkowski (2019) - Uniform on the Unit Disc
+
+In this example, data is generated uniformly on the unit disc. [Rajkowski  (2019)](https://projecteuclid.org/journals/bayesian-analysis/volume-14/issue-2/Analysis-of-the-Maximal-a-Posteriori-Partition-in-the-Gaussian/10.1214/18-BA1114.full) focuses on the behavior of the MAP clustering when using a DP mixture of Gaussians. This is a misspecfied example and he demonstrates that when the within cluster variance is set too small, the MAP clustering partitions the unit disc into several, seemingly arbitrary and non-unique convex sets. 
+
+```{r e2_dgp,message=FALSE, fig.width = 4,fig.height = 4}
+# Generate data from a uniform on the disc
+n=200
+p=2
+rsim=sqrt(runif(n))
+thetasim=runif(n)*2*pi
+x=cbind(rsim*sin(thetasim),rsim*cos(thetasim))
+ggplot() +
+  geom_point(aes(x = x[,1], y = x[,2])) + 
+  labs(x="x_1", y = "x_2") +
+  geom_circle(aes(x0=0,y0=0, r=1), col ="red") +
+  theme_bw()
+```
+
+Note that in contrast to [Rajkowski  (2019)](https://projecteuclid.org/journals/bayesian-analysis/volume-14/issue-2/Analysis-of-the-Maximal-a-Posteriori-Partition-in-the-Gaussian/10.1214/18-BA1114.full), we consider a hyperprior on the within cluster variance in the DP mixture of normals. In particular, the following results are obtained with the Normal-Inverse Gamma base measure parameters:
+
+```{r bmparams_v2}
+# Set parameter values of base measure
+a_x=matrix((p+2)/2,p,1)
+b_x=matrix(apply(x,2,var)/2*p,p,1)
+mu_0=matrix(0,p,1)
+c_x=rep(0.5,p)
+```
+
+```{r raj4results,out.width = "125%",out.height = "125%"}
+# Load and plot the results
+load("raj4_results.RData")
+alphachoices = as.numeric(unique(raj4_results$alpha))
+p1 = ggplot(data = raj4_results) +
+  geom_boxplot(aes(x = alpha, y = kmode, fill = n)) +
+  theme_bw() +
+  scale_x_discrete(labels = c("1/log(n)", as.character(round(alphachoices,2))[-1])) +
+  labs(title="Marginal Posterior Mode")
+p2 = ggplot(data = raj4_results) +
+  geom_boxplot(aes(x = alpha, y = kMAP, fill = n)) +
+  theme_bw() +
+  scale_x_discrete(labels = c("1/log(n)", as.character(round(alphachoices,2))[-1])) +
+  labs(title="MAP Clustering")
+p3 = ggplot(data = raj4_results) +
+  geom_boxplot(aes(x = alpha, y = kVI, fill = n)) +
+  theme_bw() +
+  scale_x_discrete(labels = c("1/log(n)", as.character(round(alphachoices,2))[-1])) +
+  labs(title="VI Clustering")
+p4 = ggplot(data = raj4_results) +
+  geom_boxplot(aes(x = alpha, y = kBinder, fill = n)) +
+  theme_bw() +
+  scale_x_discrete(labels = c("1/log(n)", as.character(round(alphachoices,2))[-1])) +
+  labs(title="Binder Clustering")
+grid.arrange(p1, p2, p3, p4, nrow = 2)
+```
+
+
+Again, the results highlight a quite a different behavior in the number of clusters depending on the estimator considered. The marginal posterior on the number of clusters is quite sensitive to the choice of $\alpha$ and the number of clusters in the Binder's clustering estimate increases with both $\alpha$ and $n$. In contrast, the MAP and VI estimate are more robust. In fact, the MAP clustering has only 1 cluster in almost all simulations, providing empirical evidence suggesting that accounting for uncertainty on the within-cluster variance may help to improve robustness of the MAP clustering in this setting.  
+
+## Example 3: Rajkowski (2019) - Bimodal Normal
+
+In this example, data is generated from a distribution that is only slightly bimodal. [Rajkowski  (2019)](https://projecteuclid.org/journals/bayesian-analysis/volume-14/issue-2/Analysis-of-the-Maximal-a-Posteriori-Partition-in-the-Gaussian/10.1214/18-BA1114.full) focuses on the behavior of the MAP clustering when using a DP mixture of Gaussians. In this example, [Rajkowski  (2019)](https://projecteuclid.org/journals/bayesian-analysis/volume-14/issue-2/Analysis-of-the-Maximal-a-Posteriori-Partition-in-the-Gaussian/10.1214/18-BA1114.full) shows that the clustering with single cluster has higher posterior mass than the intuitive clustering which partitions the data into groups based on positive $(x_i>0)$ and negative observed values $(x_i<0)$. 
+
+
+```{r e3_dgp,message=FALSE,out.width = "50%",out.height = "50%"}
+# Generate data from a bimodal normal
+n=500
+p=1
+usim=runif(n)
+x=matrix(rnorm(p*n),n,p)
+ind=matrix((usim<0.5)+1,1,n)
+x[ind==1,] = x[ind==1,] -1.01
+x[ind==2,] = x[ind==2,] +1.01
+ggplot() +
+  geom_histogram(aes(x=x, y = ..density..), col = "black", fill = "white") +  
+  geom_density(aes(x=x),col="red")+
+  theme_bw()
+```
+
+Again, we consider a hyperprior on the within cluster variance in the DP mixture of normals, with the Normal-Inverse Gamma base measure parameters:
+
+```{r bmparams3}
+# Set parameter values of base measure
+a_x=matrix((p+2)/2,p,1)
+khat = 2
+b_x=matrix((apply(x,2,var)/khat^2)/2*p,p,1)
+mu_0=matrix(0,p,1)
+c_x=rep(1/((p+2)*khat^2-1),p)
+```
+
+```{r raj3results,out.width = "125%",out.height = "125%"}
+# Load and plot the results
+load("raj3_results.RData")
+alphachoices = as.numeric(unique(raj3_results$alpha))
+p1 = ggplot(data = raj3_results) +
+  geom_boxplot(aes(x = alpha, y = kmode, fill = n)) +
+  theme_bw() +
+  scale_x_discrete(labels = c("2/log(n)", as.character(round(alphachoices,2))[-1])) +
+  labs(title="Marginal Posterior Mode")
+p2 = ggplot(data = raj3_results) +
+  geom_boxplot(aes(x = alpha, y = kMAP, fill = n)) +
+  theme_bw() +
+  scale_x_discrete(labels = c("2/log(n)", as.character(round(alphachoices,2))[-1])) +
+  labs(title="MAP Clustering")
+p3 = ggplot(data = raj3_results) +
+  geom_boxplot(aes(x = alpha, y = kVI, fill = n)) +
+  theme_bw() +
+  scale_x_discrete(labels = c("2/log(n)", as.character(round(alphachoices,2))[-1])) +
+  labs(title="VI Clustering")
+p4 = ggplot(data = raj3_results) +
+  geom_boxplot(aes(x = alpha, y = kBinder, fill = n)) +
+  theme_bw() +
+  scale_x_discrete(labels = c("2/log(n)", as.character(round(alphachoices,2))[-1])) +
+  labs(title="Binder Clustering")
+grid.arrange(p1, p2, p3, p4, nrow = 2)
+```
+
+Empirically, we observe the behavior discussed in [Rajkowski  (2019)](https://projecteuclid.org/journals/bayesian-analysis/volume-14/issue-2/Analysis-of-the-Maximal-a-Posteriori-Partition-in-the-Gaussian/10.1214/18-BA1114.full); in almost all replicates, regardless of the choice of $\alpha$, the MAP clustering contains only a single cluster. Instead, the VI clustering in many replicates splits the data into two roughly equally sized clusters, particularly for $\alpha=2$. 
